@@ -9,9 +9,13 @@
 --
 --
 -- An io-stream based interface to importing and export large objects.
+--
 -- Note that these functions and the streams they create must be
 -- used inside a single transaction,  and it is up to you to manage
 -- that transaction.
+--
+-- You may interleave the use of these streams with other commands
+-- on the same connection.
 --
 -----------------------------------------------------------------------------
 
@@ -56,6 +60,9 @@ loImportWithOid conn oid = do
 
 -- | @'loReadStream' conn lofd bufferSize@ returns an 'InputStream' that
 --   reads chunks of size @bufferSize@ from the large object descriptor.
+--
+--   This stream may only be used in the context of a single explicit
+--   transaction block.
 
 loReadStream :: DB.Connection -> DB.LoFd -> Int -> IO (InputStream ByteString)
 loReadStream conn lofd bufSize = do
@@ -63,8 +70,8 @@ loReadStream conn lofd bufSize = do
         x <- DB.loRead conn lofd bufSize
         return $! if BS.null x then Nothing else Just x
 
--- | @'loWriteStream' conn lofd bufferSize@ reads chunks of size @bufferSize@
---   from the large object descriptor.
+-- | @'loWriteStream' conn lofd@ returns an 'OutputStream' that
+--   writes bytestrings to the large object descriptor.
 
 loWriteStream :: DB.Connection -> DB.LoFd -> IO (OutputStream ByteString)
 loWriteStream conn lofd = do
