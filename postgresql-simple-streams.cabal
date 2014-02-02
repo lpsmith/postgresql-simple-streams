@@ -1,0 +1,33 @@
+name:                postgresql-simple-streams
+version:             0.1.0.0
+synopsis:            io-streams based interface to cursors, copy, and large objects
+description:         io-streams based interface to cursors, copy, and large objects
+license:             BSD3
+license-file:        LICENSE
+author:              Leon P Smith
+maintainer:          leon@melding-monads.com
+copyright:           (c) 2013-2014 Leon P Smith
+category:            Database
+build-type:          Simple
+-- extra-source-files:
+cabal-version:       >=1.8
+
+
+library
+  hs-source-dirs:      src
+  exposed-modules:     Database.PostgreSQL.Simple.Streams.Cursor
+                       Database.PostgreSQL.Simple.Streams.Copy
+                       Database.PostgreSQL.Simple.Streams.LargeObjects
+
+  -- other-modules:
+
+  -- other-extensions:
+  build-depends:       base >= 4 && < 5,
+                       blaze-builder,
+                       blaze-textual,
+                       bytestring >= 0.9,
+                       postgresql-simple >= 0.3.4,
+                       postgresql-libpq,
+                       io-streams
+
+  ghc-options: -Wall -fno-warn-name-shadowing -fno-warn-unused-do-bind
