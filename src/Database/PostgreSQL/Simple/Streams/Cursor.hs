@@ -10,10 +10,11 @@
 -- An io-streams interface to database queries.
 --
 -- These functions and the streams they create must be used inside a
--- single explicit transaction block.  The streams will
--- cease to be functional after you commit or rollback.   It is up to
--- you to manage that transaction,  unlike the 'fold' operator which
--- creates a transaction block if you are not already in one.
+-- single explicit transaction block.  Attempting to use a stream
+-- after the transaction commits or rolls back will eventually result
+-- in an exception.  It is up to you to manage that transaction,
+-- unlike the 'fold' operator which creates a transaction block if
+-- you are not already in one.
 --
 -- You may interleave the use of these streams with other commands
 -- on the same connection.
@@ -21,7 +22,7 @@
 -----------------------------------------------------------------------------
 
 {-# LANGUAGE OverloadedStrings, RecordWildCards #-}
- 
+
 module Database.PostgreSQL.Simple.Streams.Cursor
     ( openCursor
     , openCursor_
@@ -63,8 +64,8 @@ openCursor_ = openCursorWithOptions_ defaultFoldOptions
 --   option is ignored.
 openCursorWithOptions :: ( ToRow q, FromRow r )
                       => FoldOptions
-                      -> Connection 
-                      -> Query -> q 
+                      -> Connection
+                      -> Query -> q
                       -> IO ( Streams.InputStream r )
 openCursorWithOptions opts conn template qs = do
   q <- formatQuery conn template qs
