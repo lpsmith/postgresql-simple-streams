@@ -8,7 +8,7 @@
 -- Stability   :  experimental
 --
 --
--- An io-stream based interface to @COPY OUT@.
+-- An io-stream based interface to @COPY@.
 --
 -- These operators do not need to be run in an explicit transaction,  however
 -- it is necessary to fully consume the resulting stream before another
@@ -27,6 +27,7 @@ module Database.PostgreSQL.Simple.Streams.Copy
      , copyOut_
      ) where
 
+import           Prelude hiding (catch)
 import           Control.Concurrent.MVar
 import           Control.Exception
 import           Data.ByteString (ByteString)

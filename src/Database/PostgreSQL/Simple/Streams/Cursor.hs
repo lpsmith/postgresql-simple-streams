@@ -31,6 +31,7 @@ module Database.PostgreSQL.Simple.Streams.Cursor
     , FoldOptions(..)
     ) where
 
+import           Prelude hiding (catch)
 import           Blaze.ByteString.Builder
 import           Blaze.Text
 
@@ -113,12 +114,12 @@ openCursorWithOptions_ FoldOptions{..} conn q = do
         return name
     fetch (Query name) = query_ conn $
         Query (toByteString (fromByteString "FETCH FORWARD "
-                             <> integral chunkSize
-                             <> fromByteString " FROM "
-                             <> fromByteString name
+                             `mappend` integral chunkSize
+                             `mappend` fromByteString " FROM "
+                             `mappend` fromByteString name
                             ))
     close name =
-        (execute_ conn ("CLOSE " <> name) >> return ()) `catch` \ex ->
+        (execute_ conn ("CLOSE " `mappend` name) >> return ()) `catch` \ex ->
             -- Don't throw exception if CLOSE failed because the transaction is
             -- aborted.  Otherwise, it will throw away the original error.
             if isFailedTransactionError ex then return () else throwIO ex
