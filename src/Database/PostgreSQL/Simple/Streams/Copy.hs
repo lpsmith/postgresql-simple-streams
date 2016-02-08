@@ -17,21 +17,27 @@
 -----------------------------------------------------------------------------
 
 {-# LANGUAGE OverloadedStrings, ScopedTypeVariables #-}
+{-# LANGUAGE CPP, BangPatterns, DoAndIfThenElse #-}
 
 module Database.PostgreSQL.Simple.Streams.Copy
      ( withCopyIn
      , withCopyIn_
      , copyIn
      , copyIn_
+     , withCopyOut
+     , withCopyOut_
      , copyOut
      , copyOut_
      ) where
 
 import           Prelude hiding (catch)
+import           Control.Concurrent ( threadWaitRead )
 import           Control.Concurrent.MVar
 import           Control.Exception
+import           Control.Monad ( void )
 import           Data.ByteString (ByteString)
 import qualified Data.ByteString.Char8 as B
+import           Data.IORef
 import           Database.PostgreSQL.Simple
 import           Database.PostgreSQL.Simple.Types
 import           Database.PostgreSQL.Simple.Internal
@@ -39,6 +45,7 @@ import           Database.PostgreSQL.Simple.Copy
 import qualified Database.PostgreSQL.LibPQ as PQ
 
 import           System.IO.Streams ( InputStream, OutputStream )
+import           System.IO.Streams.Internal ( InputStream(..) )
 import qualified System.IO.Streams as Streams
 
 -- | This wraps a call to 'copyIn' so that the copy will be committed
@@ -49,7 +56,6 @@ import qualified System.IO.Streams as Streams
 --
 --   Upon an abort, the error message passed to 'putCopyError' will be
 --   the 'show' of the exception.
-
 withCopyIn :: ( ToRow params ) => Connection -> Query -> params -> (OutputStream ByteString -> IO a) -> IO a
 withCopyIn conn template qs thing = mask $ \restore -> do
     (outS, abort) <- copyIn conn template qs
@@ -132,27 +138,61 @@ doCopyIn funcName conn template q = do
             else putCopyError conn msg
     return (outS, abort)
 
--- It might be nice to implement withCopyOut such that the copy is cancelled
--- if it's still ongoing after the block is exited.
+-- | Issues a @COPY TO STDOUT@ command and creates an 'InputStream' that
+--   returns the resulting data.
+--
+--   This function ensures that the `InputStream` has been either fully
+--   consumed or cancelled after the control flow exits the enclosing
+--   block.   Note that cancelling this operation is a fairly expensive
+--   operation,  so it is often preferable to fully consume the stream
+--   instead.
+withCopyOut :: ( ToRow params )
+            => Connection -> Query -> params
+            -> (InputStream ByteString -> IO a) -> IO a
+withCopyOut conn template qs thing = do
+    q <- formatQuery conn template qs
+    bracket
+        (doCopyOut funcName conn template q)
+        snd
+        (thing . fst)
+  where
+    funcName = "Database.PostgreSQL.Simple.Streams.Copy.withCopyOut"
+
+-- | A variant of `withCopyOut` that does not perform parameter substitution.
+withCopyOut_ :: Connection -> Query
+             -> (InputStream ByteString -> IO a) -> IO a
+withCopyOut_ conn (Query q) thing = do
+    bracket
+        (doCopyOut funcName conn (Query q) q)
+        snd
+        (thing . fst)
+  where
+    funcName = "Database.PostgreSQL.Simple.Streams.Copy.withCopyOut_"
 
 -- | Issues a @COPY TO STDOUT@ command and creates an 'InputStream' that
 --   returns the resulting data.
 --
 --   Note that the @InputStream@ must be fully consumed in order for the
 --   connection to be usable for anything else.
-
-copyOut :: ( ToRow params ) => Connection -> Query -> params -> IO (InputStream ByteString)
+--
+--   The function also returns an IO action that can be used to cancel
+--   the operation;  however note that cancelling the operation is fairly
+--   expensive,  as it involves opening another connection to the postgres
+--   database.   Thus, if the number of rows remaining is not large,
+--   it may make sense to run the stream to completion instead.
+copyOut :: ( ToRow params )
+        => Connection -> Query -> params
+        -> IO (InputStream ByteString, IO ())
 copyOut conn template qs = do
     q <- formatQuery conn template qs
     doCopyOut "Database.PostgreSQL.Simple.Streams.Copy.copyOut" conn template q
 
-
 -- | Variant of 'copyOut' that does not perform parameter substitution.
-copyOut_ :: Connection -> Query -> IO (InputStream ByteString)
+copyOut_ :: Connection -> Query -> IO (InputStream ByteString, IO ())
 copyOut_ conn (Query q) = do
     doCopyOut "Database.PostgreSQL.Simple.Streams.Copy.copyOut_" conn (Query q) q
 
-doCopyOut :: B.ByteString -> Connection -> Query -> B.ByteString -> IO (InputStream ByteString)
+doCopyOut :: B.ByteString -> Connection -> Query -> B.ByteString -> IO (InputStream ByteString, IO ())
 doCopyOut funcName conn template q = do
     result <- exec conn q
     status <- PQ.resultStatus result
@@ -168,8 +208,76 @@ doCopyOut funcName conn template q = do
       PQ.BadResponse   -> throwResultError funcName result status
       PQ.NonfatalError -> throwResultError funcName result status
       PQ.FatalError    -> throwResultError funcName result status
-    Streams.makeInputStream $ do
-      x <- getCopyData conn
-      case x of
-        CopyOutRow  row    -> return $! Just row
-        CopyOutDone _count -> return Nothing
+    doneRef <- newMVar False
+    pbRef   <- newIORef []
+
+    let pb x = readIORef pbRef >>= \xs -> writeIORef pbRef (x:xs)
+
+    let grab = do
+          rs <- readIORef pbRef
+          case rs of
+            [] -> do
+                modifyMVar doneRef $ \done ->
+                    if done
+                    then return (True, Nothing)
+                    else do
+                      x <- getCopyData conn
+                      case x of
+                        CopyOutRow row     -> return (False, Just row)
+                        CopyOutDone _count -> return (True,  Nothing )
+            (r:rs') -> do
+                writeIORef pbRef rs'
+                return $! Just r
+
+    let cancel = do
+          done <- swapMVar doneRef True
+          if done
+          then return ()
+          else do
+            withConnection conn $ \c -> do
+              status <- PQ.transactionStatus c
+              case status of
+                PQ.TransActive -> do
+                    PQ.getCancel c >>= maybe (return ()) (void . PQ.cancel)
+                    discardCopyData funcName c
+                _ -> do
+                    return ()
+
+    let !inS = InputStream grab pb
+
+    return $! ( inS, cancel )
+
+discardCopyData :: B.ByteString -> PQ.Connection -> IO ()
+discardCopyData funcName pqconn = loop
+  where
+    loop = do
+#if defined(mingw32_HOST_OS)
+      row <- PQ.getCopyData pqconn False
+#else
+      row <- PQ.getCopyData pqconn True
+#endif
+      case row of
+        PQ.CopyOutRow _rowdata -> loop
+        PQ.CopyOutDone -> return ()
+#if defined(mingw32_HOST_OS)
+        PQ.CopyOutWouldBlock -> do
+            fail (B.unpack funcName ++ ": the impossible happened")
+#else
+        PQ.CopyOutWouldBlock -> do
+            mfd <- PQ.socket pqconn
+            case mfd of
+              Nothing -> throwIO (fdError funcName)
+              Just fd -> do
+                  threadWaitRead fd
+                  _ <- PQ.consumeInput pqconn
+                  loop
+#endif
+        PQ.CopyOutError -> do
+            mmsg <- PQ.errorMessage pqconn
+            throwIO SqlError {
+                          sqlState       = "",
+                          sqlExecStatus  = FatalError,
+                          sqlErrorMsg    = maybe "" id mmsg,
+                          sqlErrorDetail = "",
+                          sqlErrorHint   = funcName
+                        }
